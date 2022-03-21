@@ -5,56 +5,58 @@
 #include <iostream>
 #include <fstream>
 
-typedef fixed_stack<int> avail_rows;
+void* shared_allocator(std::size_t size) {
+  void* res = malloc(size);
+  std::cout << "Allocated " << size << " bytes at " << res << "\n";
+  return res;
+}
 
-// Ваша shared-структура
 struct table : shared_struct {
-	std::size_t counter = 0;
+  // Генерация нужных методов
+  generate_methods(table)
 
-	struct_wrapper& build_by_address(void* addr) {
-		// Если передали адрес для создания - берем готовую структуру
-		if (!addr) {
-			// иначе - создаём структуру, в памяти, которую выделил переданный аллокатор (в данном случае malloc)
-			addr = (void*)&struct_builder().add_field(free_rows, 100).build(malloc);
-			// ниже в документации будет пример с shared-сегментами из linux'а
-		}
-		return *((struct_wrapper*)addr);
-	}
-public:
-	//avail_rows& free_rows;
-	avail_rows& free_rows;
+  // Строим структуру
+  builder_start
+    add_field(x, 10)
+  builder_end
 
-	// хотели хранить в нашей структуре free_rows, берем их из нашего wrapper'а
-	table(void* addr = nullptr) : counter(0), shared_struct(build_by_address(addr)), init_field(free_rows) {
+  // Нужные поля
+  fixed_array<int>& x;
 
-	}
-
+  // Генерируем конструктор, инициализируем ссылки
+  generate_constructor(table, x)
 };
-int main() {
-	table t;
-	for (int i = 0; i < 100; ++i)
-		t.free_rows.push(i * i);
-	while (t.free_rows.size() > 50) {
-		std::cout << t.free_rows.top() << " ";
-		t.free_rows.pop();
-	}
-	// Запишем структуру на диск
-	std::ofstream file("table", std::ios::binary);
-	file.write((const char*)t.get_struct_address(), t.get_struct_size());
-	free(t.get_struct_address());
-	file.flush();
-	file.close();
 
-	// Считаем её
-	std::ifstream file_in("table", std::ios::binary);
-	char buffer[600] = {};
-	file_in.read((char*)&buffer, 600);
-	// P.S. auto because broken markdown
-	auto t2 = table((void*)buffer);
-	// Всё еще работает!
-	while (!t2.free_rows.empty()) {
-		std::cout << t2.free_rows.top() << " ";
-		t2.free_rows.pop();
-	}
+struct two_tables : shared_struct {
+  // Генерация нужных методов
+  generate_methods(two_tables)
+
+  // Строим структуру
+  builder_start
+    add_field(t1)
+    add_field(t2)
+  builder_end
+
+  // Нужные поля
+  table& t1, & t2;
+  // Генерируем конструктор, инициализируем ссылки
+  generate_constructor(two_tables, t1, t2)
+
+  ~two_tables() {
+    // Удаляем t1 и t2, тк это экземпляры table, созданные через new
+    delete& t1;
+    delete& t2;
+  }
+};
+
+
+int main() {
+  two_tables t;
+  t.t1.x[0] = 1;
+  t.t2.x[1] = 1;
+  for (int i = 0; i < 10; ++i) {
+    std::cout << t.t1.x[i] << " " << t.t2.x[i] << "\n";
+  }
+  
 }
 ```
