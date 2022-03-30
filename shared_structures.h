@@ -259,7 +259,9 @@ public:
 		}
 		return field_info::build(ptr, count, 1);
 	}
-
+private:
+	can_be_shared(const can_be_shared& other) {};
+	can_be_shared& operator=(const can_be_shared& other) {};
 };
 
-#endif
+#endif 
