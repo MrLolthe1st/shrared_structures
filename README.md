@@ -1,62 +1,64 @@
-# Dynamic through static shared structures builder
-Если вам надо создать какую-то структуру, которая полностью размещается на непрерывном куске памяти, доступ к которой может быть осуществлен из нескольких процессов и, при этом, эта структура *не может быть построена во время компиляции* (например, вам надо создавать таблицы с разным кол-вом строк, разной длиной строк, разным кол-вом столбцов, и тп) -- эта библиотека Вам поможет. Сразу перейдём к примерам:
+Ищи описание на хабре @mrlolthe1st.
 ```cpp
+#define _CRT_SECURE_NO_WARNINGS
 #include "shared_structures.h"
 #include <iostream>
 #include <fstream>
-
+#include <cassert>
+#include <queue>
+// Аллокатор "shared"-памяти (тут используем свой)
+std::vector<void*> to_be_free;
 void* shared_allocator(std::size_t size) {
-  void* res = malloc(size);
-  std::cout << "Allocated " << size << " bytes at " << res << "\n";
-  return res;
+	assert(size != 0);
+	void* res = malloc(size);
+	to_be_free.push_back(res);
+	std::cout << "Allocated " << size << " bytes at " << res << "\n";
+	return res;
 }
 
-struct table : shared_struct {
-  // Генерация нужных методов
-  generate_methods(table)
-
-  // Строим структуру
-  builder_start
-    add_field(x, 10)
-  builder_end
-
-  // Нужные поля
-  fixed_array<int>& x;
-
-  // Генерируем конструктор, инициализируем ссылки
-  generate_constructor(table, x)
+struct dyn_array : can_be_shared {
+	int* size;
+	int* data;
+	static void init_data(int& what, std::size_t idx) {
+		what = idx * idx;
+	}
+	dyn_array(int sz) : can_be_shared({ field(&size), array(&data, sz, init_data) }) {
+		*size = sz;
+	}
+	dyn_array(void* ptr) : from_existing(ptr), can_be_shared({ existing_field(&size), existing_array(&data) }) {}
 };
 
-struct two_tables : shared_struct {
-  // Генерация нужных методов
-  generate_methods(two_tables)
-
-  // Строим структуру
-  builder_start
-    add_field(t1)
-    add_field(t2)
-  builder_end
-
-  // Нужные поля
-  table& t1, & t2;
-  // Генерируем конструктор, инициализируем ссылки
-  generate_constructor(two_tables, t1, t2)
-
-  ~two_tables() {
-    // Удаляем t1 и t2, тк это экземпляры table, созданные через new
-    delete& t1;
-    delete& t2;
-  }
+struct dyn_inconsistent_matrix : can_be_shared {
+	dyn_array* x;
+	static void init_array(dyn_array& arr, std::size_t idx) {
+		new (&arr) dyn_array(idx + 2);
+	}
+	dyn_inconsistent_matrix(int cnt) : can_be_shared({ array(&x, cnt, init_array) }) {}
+	dyn_inconsistent_matrix(void* from) : from_existing(from), can_be_shared({ existing_array(&x) }) {}
 };
-
 
 int main() {
-  two_tables t;
-  t.t1.x[0] = 1;
-  t.t2.x[1] = 1;
-  for (int i = 0; i < 10; ++i) {
-    std::cout << t.t1.x[i] << " " << t.t2.x[i] << "\n";
-  }
-  
+	int n = 5;
+	dyn_inconsistent_matrix m(5);
+	void* save_ptr = m.make_shared(shared_allocator);
+	dyn_inconsistent_matrix m_ref(save_ptr);
+	for (int i = 0; i < n; ++i) {
+		std::cout << i << ": ";
+		int orig_size = *m.x[i].size;
+		int ref_size = *m_ref.x[i].size;
+		std::cout << "Size: orig: " << *m.x[i].size << " ref: " << ref_size << "\n";
+		if (orig_size != ref_size) {
+			throw std::runtime_error("Ooops:(");
+		}
+		for (int j = 0; j < orig_size; ++j) {
+			std::cout << "\tData: orig: " << m.x[i].data[j] << " ref: " << m_ref.x[i].data[j] << "\n";
+			m.x[i].data[j] = -1 + j;
+			std::cout << "\t After change: orig: " << m.x[i].data[j] << " ref: " << m_ref.x[i].data[j] << "\n";
+
+		}
+	}
+	for (auto& e : to_be_free) {
+		free(e);
+	}
 }
 ```
