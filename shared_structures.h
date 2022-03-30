@@ -2,252 +2,264 @@
 #define SHARED_STRUCTS_
 #include <cstddef>
 #include <stdexcept>
-#include <string>
 #include <vector>
 #include <cstdlib>
 #include <cstring>
 
-template<typename T>
-struct fixed_array {
-private:
-	std::size_t _size;
-public:
-	fixed_array(std::size_t size) {
-		this->_size = size;
-		for (std::size_t i = 0; i < size; ++i) {
-			this->operator[](i) = T();
+typedef void* (*memory_allocator)(std::size_t);
+typedef std::pair<void*, std::size_t> flatten_result;
+
+struct field_info {
+	void** pointer_to_pointer;
+	bool is_existing;
+	std::size_t count;
+	flatten_result(*flat_fn)(void*);
+	bool is_shared;
+	std::size_t(*destroy_)(void*);
+	void* (*init_at_)(void*, void*);
+	std::size_t type_size;
+	std::string tn_;
+
+	flatten_result flatten() {
+		std::size_t size = sizeof(std::size_t);
+		void* result = malloc(size);
+		if (!result) {
+			throw std::runtime_error("Out of memory");
 		}
-	}
-
-	static fixed_array<T>& from_struct_pointer(void* ptr) {
-		return *((fixed_array<T>*)ptr);
-	}
-
-	inline std::size_t get_max_size() {
-		return _size;
-	}
-
-	inline std::size_t get_size() {
-		return sizeof(fixed_array<T>) + sizeof(T) * _size;
-	}
-
-	inline T& operator[](std::size_t pos) {
-		return *(T*)((std::size_t)this + sizeof(fixed_array) + pos * sizeof(T));
-	}
-
-	static std::pair<std::size_t, fixed_array<T>*> build(std::size_t size) {
-		std::size_t bytes_to_allocate = size * sizeof(T) + sizeof(fixed_array<T>);
-		fixed_array<T>* result = (fixed_array<T>*)malloc(bytes_to_allocate);
-		new(result) fixed_array<T>(size);
-		return { bytes_to_allocate, result };
-	}
-
-	void destroy_after_build() {
-		free((void*)this);
-	}
-
-	static void copy_to(void* from, void* to) {
-		auto a = (fixed_array<T>*) from;
-		auto b = (fixed_array<T>*) to;
-		memcpy(to, from, a->get_size());
-	}
-
-};
-
-typedef struct struct_wrapper struct_wrapper_;
-
-struct struct_builder {
-private:
-	bool is_done;
-	void* data;
-	std::size_t current_size;
-	std::vector<std::pair<std::size_t, void(*)(void*, void*)>> fields;
-public:
-	struct_builder() {
-		is_done = 0;
-		current_size = 0;
-		data = 0;
-	}
-
-
-	template<typename T, typename ...Args>
-	struct_builder& add(Args&& ...args) {
-		if (is_done) {
-			throw std::runtime_error("Structure build is done, can't add other structures.");
+		*(std::size_t*)result = count;
+		void* cur_ptr_data = *pointer_to_pointer;
+		for (std::size_t i = 0; i < count; ++i) {
+			flatten_result f = flat_fn(cur_ptr_data);
+			std::size_t last_offset = size;
+			size += f.second;
+			void* prev_ptr = result;
+			result = realloc(result, size);
+			if (!result) {
+				free(prev_ptr);
+				throw std::runtime_error("Out of memory");
+			}
+			memcpy((void*)((size_t)result + last_offset), f.first, f.second);
+			free(f.first);
+			cur_ptr_data = (void*)((std::size_t)cur_ptr_data + type_size);
 		}
+		return { result, size };
+	}
 
-		// Build structure
-		std::pair<std::size_t, T*> obj = T::build(args...);
-
-		// Allocate more data
-		if (data) {
-			data = realloc(data, current_size + obj.first);
+	std::size_t destroy() {
+		if (is_existing) {
+			return type_size * count;
 		}
-		else {
-			data = malloc(obj.first);
+		std::size_t size = 0;
+		void* ptr = *pointer_to_pointer;
+		for (std::size_t i = 0; i < count; ++i) {
+			std::size_t sz = destroy_(ptr);
+			ptr = (void*)((std::size_t)ptr + type_size);
+			size += sz;
 		}
+		is_existing = 1;
+		free(*pointer_to_pointer);
+		return size;
+	}
 
-		// Copy to allocated raw data
-		T::copy_to((void*)obj.second, (void*)((size_t)data + current_size));
-
-		// Increment size
-		current_size += obj.first;
-		fields.push_back({ obj.first, static_cast<void(*)(void*,void*)>(&(T::copy_to)) });
-
-		// Destroy original object
-		obj.second->destroy_after_build();
-		return *this;	}
-
-	struct_wrapper_& build(void* (*allocator)(std::size_t));
-
-
-};
-
-struct struct_wrapper {
-
-	std::size_t offsets_offset;
-	std::size_t offsets_count;
-
-	std::size_t get_size() {
-		return offsets_offset + offsets_count * sizeof(std::size_t);
+	void* init_at(void* ptr) {
+		char* cur_ptr = (char*)*pointer_to_pointer;
+		ptr = (void*)((std::size_t)ptr + sizeof(std::size_t));
+		if (!is_shared) {
+			if (!this->is_existing) {
+				free(*pointer_to_pointer);
+				this->is_existing = 1;
+			}
+			*pointer_to_pointer = ptr;
+		}
+		for (std::size_t i = 0; i < count; ++i) {
+			ptr = init_at_((void*)cur_ptr, ptr);
+			cur_ptr += type_size;
+		}
+		return ptr;
 	}
 
 	template<typename T>
-	T* get_at_offset(std::size_t offset) {
-		return (T*)((std::size_t)this + offset);
+	static flatten_result std_flat(T* what) {
+		void* x = malloc(sizeof(T));
+		memcpy(x, (void*)what, sizeof(T));
+		return { x, sizeof(T) };
 	}
 
-	inline std::size_t& get_offset(std::size_t index) {
-		return *get_at_offset<std::size_t>(offsets_offset + index * sizeof(std::size_t));
+	template<typename T>
+	static std::size_t std_dest(void* what) {
+		return sizeof(T);
 	}
 
-	void* get_struct_ptr(std::size_t idx) {
-		if (idx >= offsets_count) {
-			throw std::runtime_error("Can't get struct at idx=" + std::to_string(idx) + "(offsets_count=" + std::to_string(offsets_count) + ").");
+	template<typename T>
+	static void* std_init(void* where, void* what) {
+		return (void*)((std::size_t)what + sizeof(T));
+	}
+
+	template<typename T>
+	static field_info build(T** ptr, std::size_t count, bool is_ex) {
+		bool is_shared = 0;
+		std::size_t(*destroy)(void*) = std_dest<T>;
+		flatten_result(*flatten)(void*) = (flatten_result(*)(void*))std_flat<T>;
+		void* (*init_at)(void*, void*) = std_init<T>;
+		if constexpr (!std::is_fundamental<T>::value) {
+			flatten = T::flatten;
+			destroy = T::destroy;
+			is_shared = 1;
+			init_at = T::init_at;
 		}
-		return get_at_offset<void>(get_offset(idx));
+		field_info res;
+		res.flat_fn = flatten;
+		res.destroy_ = destroy;
+		res.is_shared = is_shared;
+		res.init_at_ = init_at;
+		res.pointer_to_pointer = (void**)ptr;
+		res.type_size = sizeof(T);
+		res.is_existing = !is_ex;
+		res.count = count;
+		res.tn_ = typeid(T).name();
+		return res;
 	}
 
 };
 
-#include <iostream>
+struct from_existing {
+	void* ptr;
+	from_existing(void* ptr = nullptr) : ptr(ptr) {};
 
-struct_wrapper& struct_builder::build(void* (*allocator)(std::size_t)) {
-	std::size_t summary_size = sizeof(struct_wrapper) + sizeof(std::size_t) * fields.size() + current_size;
-
-	struct_wrapper* sw = (struct_wrapper*)allocator(summary_size);
-
-	sw->offsets_offset = sizeof(struct_wrapper) + current_size;
-	sw->offsets_count = fields.size();
-
-	std::size_t current_offset = 0;
-	std::size_t index = 0;
-	for (auto& field : fields) {
-		sw->get_offset(index++) = current_offset + sizeof(struct_wrapper);
-		field.second((void*)((size_t)data + current_offset), (void*)((size_t)sw + current_offset + sizeof(struct_wrapper)));
-		current_offset += field.first;
+	template<typename T, typename ...Args>
+	field_info existing_field(T** ptr, bool from_array = 0) {
+		if (!from_array) {
+			std::size_t array_size = *(std::size_t*)this->ptr;
+			if (array_size != 1)
+				throw std::runtime_error("Excepted field, but got array");
+			inc(sizeof(std::size_t));
+		}
+		if constexpr (std::is_fundamental<T>::value) {
+			if (from_array) {
+				return {};
+			}
+			*ptr = (T*)this->ptr;
+			inc(sizeof(T));
+			return field_info::build(ptr, 1, 0);
+		}
+		else {
+			if (!from_array) {
+				*ptr = (T*)malloc(sizeof(T));
+			}
+			new(*ptr) T(this->ptr);
+			this->ptr = T::init_at(*ptr, this->ptr);
+		}
+		return field_info::build(ptr, 1, 1);
 	}
 
-	free(data);
-	return *sw;
-}
+	template<typename T, typename ...Args>
+	void existing_field_from_array(T* ptr) {
+		new(ptr) T(this->ptr);
+		this->ptr = T::init_at(ptr, this->ptr);
+	}
 
-struct shared_struct {
-protected:
-	struct_wrapper& wrapper;
-	std::size_t counter;
+	template<typename T, typename ...Args>
+	field_info existing_array(T** ptr) {
+		std::size_t array_size = *(std::size_t*)this->ptr;
+		inc(sizeof(std::size_t));
+		if constexpr (std::is_fundamental<T>::value) {
+			*ptr = (T*)this->ptr;
+			return field_info::build(ptr, array_size, 0);
+		}
+		else {
+			*ptr = (T*)(malloc(sizeof(T) * array_size));
+			for (std::size_t i = 0; i < array_size; ++i) {
+				existing_field_from_array((T*)(*ptr + i));
+			}
+		}
+		return field_info::build(ptr, array_size, 1);
+	}
+
+	void inc(std::size_t amount) {
+		this->ptr = (void*)((std::size_t)this->ptr + amount);
+	}
+};
+
+struct can_be_shared : virtual from_existing {
+	// store schema to use in parent structs
+	// Store pointer to pointer to init
+	std::vector<field_info> pointers_to_init;
 public:
+	can_be_shared(std::vector<field_info> pointers_to_init) : pointers_to_init(pointers_to_init) {
+	};
 
-	std::size_t get_size() {
-		return wrapper.get_size();
+	static flatten_result flatten(void* th) {
+		can_be_shared* obj = (can_be_shared*)th;
+		void* data = nullptr;
+		std::size_t size = 0;
+		for (auto& e : obj->pointers_to_init) {
+			flatten_result res = e.flatten();
+			std::size_t prev_offset = size;
+			size += res.second;
+			void* prev_ptr = data;
+			data = realloc(data, size);
+			if (!data) {
+				free(prev_ptr);
+				throw new std::runtime_error("Out of memory");
+			}
+			void* cur_ptr = (void*)((std::size_t)data + prev_offset);
+			memcpy(cur_ptr, res.first, res.second);
+			free(res.first);
+		}
+		return { data, size };
 	}
 
-	shared_struct(struct_wrapper& wrap) : wrapper(wrap), counter(0){
+	static void* init_at(void* th, void* ptr) {
+		can_be_shared* obj = (can_be_shared*)th;
+		for (auto& e : obj->pointers_to_init) {
+			ptr = e.init_at(ptr);
+		}
+		return ptr;
+	}
 
+	void* make_shared(memory_allocator shared_allocator) {
+		flatten_result res = flatten((void*)this);
+		void* data = shared_allocator(res.second);
+		memcpy(data, res.first, res.second);
+		init_at((void*)this, data);
+		free(res.first);
+		return data;
+	}
+
+	static std::size_t destroy(void* th) {
+		std::size_t size = 0;
+		can_be_shared* obj = (can_be_shared*)th;
+		for (auto& e : obj->pointers_to_init) {
+			if (!e.is_existing)
+				size += e.destroy(), e.is_existing = 1;
+		}
+		obj->~can_be_shared();
+		return size;
+	}
+
+	~can_be_shared() {
+		for (auto& e : pointers_to_init) {
+			e.destroy();
+			e.is_existing = 1;
+		}
+	}
+
+	template<typename T, typename ...Args>
+	field_info field(T** ptr, Args&& ...args) {
+		*ptr = (T*)malloc(sizeof(T));
+		new(*ptr) T(args...);
+		return field_info::build(ptr, 1, 1);
+	}
+
+	template<typename T, typename ...Args>
+	field_info array(T** ptr, std::size_t count, void(*init_fn)(T&, std::size_t, Args&...), Args&...args) {
+		*ptr = (T*)(malloc(sizeof(T) * count));
+		for (std::size_t i = 0; i < count; ++i) {
+			init_fn((*ptr)[i], i, args...);
+		}
+		return field_info::build(ptr, count, 1);
 	}
 
 };
-
-#define get_type(field) std::remove_reference<decltype(field)>::type
-#define init_field(field) field(get_type(field)::from_struct_pointer(wrapper.get_struct_ptr(counter++)))
-#define add_field(field, ...) .add<std::remove_reference<decltype(field)>::type>(__VA_ARGS__)
-
-#define generate_constructor(class_name, ...) class_name (void* ptr = nullptr) : shared_struct(build_by_ptr(ptr, shared_allocator)), init_vars(__VA_ARGS__) {}
-
-#define generate_methods(class_name) \
-static class_name& from_struct_pointer(void* x) {\
-	auto res = (new class_name(x));\
-	return *res;\
-}\
-static std::pair<std::size_t, class_name*> build() {\
-	auto& res = build_by_ptr(nullptr, malloc);\
-	return { res.get_size(), (class_name*)&res };\
-}\
-static void copy_to(void* from, void* to) {\
-	auto a = (struct_wrapper*)from;\
-	auto b = (struct_wrapper*)to;\
-	memcpy(to, from, a->get_size());\
-}\
-\
-void destroy_after_build() {\
-	free((void*)this);\
-}
-
-#define builder_start static struct_wrapper& build_by_ptr(void* ptr, void* (*allocator)(std::size_t)) {\
-if (!ptr) {\
-	ptr = (void*)&struct_builder()
-
-#define builder_end .build(allocator);\
-}\
-return *((struct_wrapper*)ptr);\
-}
-
-
-#define CHECK_N(x, n, ...) n
-#define CHECK(...) CHECK_N(__VA_ARGS__, 0,)
-#define PROBE(x) x, 1,
-#define IS_PAREN(x) CHECK(IS_PAREN_PROBE x)
-#define IS_PAREN_PROBE(...) PROBE(~)
-#define COMPL(b) PRIMITIVE_CAT(COMPL_, b)
-#define COMPL_0 1
-#define COMPL_1 0
-#define EMPTY()
-#define DEFER(id) id EMPTY()
-#define OBSTRUCT(...) __VA_ARGS__ DEFER(EMPTY)()
-#define NOT(x) CHECK(PRIMITIVE_CAT(NOT_, x))
-#define NOT_0 PROBE(~)
-#define BOOL(x) COMPL(NOT(x))
-#define IF(c) IIF(BOOL(c))
-
-#define EAT(...)
-#define EXPAND(...) __VA_ARGS__
-#define EVAL2(...) EVAL3(EVAL3(EVAL3(__VA_ARGS__)))
-#define EVAL3(...) EVAL4(EVAL4(EVAL4(__VA_ARGS__)))
-#define EVAL4(...) EVAL5(EVAL5(EVAL5(__VA_ARGS__)))
-#define EVAL5(...) __VA_ARGS__
-#define oo(x) int(x)
-
-#define WHILE(pred, fst, ...) \
-    IF(pred(fst)) \
-    ( \
-		OBSTRUCT(WHILE_INDIRECT) () \
-        ( \
-            pred, __VA_ARGS__, init_field(fst) \
-        ),  \
-         __VA_ARGS__\
-    )
-
-#define IIF(c) PRIMITIVE_CAT(IIF_, c)
-#define IIF_0(t, ...) __VA_ARGS__
-#define IIF_1(t, ...) t
-
-#define CAT(a, ...) PRIMITIVE_CAT(a, __VA_ARGS__)
-#define PRIMITIVE_CAT(a, ...) a ## __VA_ARGS__
-
-#define WHILE_INDIRECT() WHILE
-#define MM(x, ...) __VA_ARGS__
-#define MX(x, ...) x, 1, 
-#define WWW(f, ...) NOT(IS_PAREN(f))
-#define init_vars(...) EVAL2(WHILE(WWW, __VA_ARGS__, ()))
 
 #endif
