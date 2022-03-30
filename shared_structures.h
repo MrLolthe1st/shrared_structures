@@ -7,27 +7,48 @@
 #include <cstring>
 
 typedef void* (*memory_allocator)(std::size_t);
-typedef std::pair<void*, std::size_t> flatten_result;
+using flatten_result = std::pair<void*, std::size_t>;
 
 struct field_info {
+	// Указатель на указатель (который является полем структуры)
+	// который необходимо проинициализировать
 	void** pointer_to_pointer;
 	bool is_existing;
+	// Количество объектов в массиве (поле = массив длины 1)
 	std::size_t count;
+	// Функция, которая создаст из подконтрольного поля "плоский" кусок памяти с данными
 	flatten_result(*flat_fn)(void*);
 	bool is_shared;
+	// Функция, которая уничтожит созданный нами на куче объект (если небходимо)
 	std::size_t(*destroy_)(void*);
+	// Функция, 
 	void* (*init_at_)(void*, void*);
 	std::size_t type_size;
-	std::string tn_;
 
 	flatten_result flatten() {
 		std::size_t size = sizeof(std::size_t);
+		
 		void* result = malloc(size);
+		
 		if (!result) {
 			throw std::runtime_error("Out of memory");
 		}
+		
 		*(std::size_t*)result = count;
+		
 		void* cur_ptr_data = *pointer_to_pointer;
+
+		if (!is_shared) {
+			void* prev_ptr = result;
+			result = realloc(result, size + count * type_size);
+			if (!result) {
+				free(prev_ptr);
+				throw std::runtime_error("Out of memory");
+			}
+			memcpy((void*)((size_t)result + size), cur_ptr_data, count * type_size);
+			return { result, size + count * type_size };
+		}
+
 		for (std::size_t i = 0; i < count; ++i) {
 			flatten_result f = flat_fn(cur_ptr_data);
 			std::size_t last_offset = size;
@@ -70,6 +91,8 @@ struct field_info {
 				this->is_existing = 1;
 			}
 			*pointer_to_pointer = ptr;
+			ptr = (void*)((std::size_t)ptr + type_size * count);
+			return ptr;
 		}
 		for (std::size_t i = 0; i < count; ++i) {
 			ptr = init_at_((void*)cur_ptr, ptr);
@@ -98,7 +121,7 @@ struct field_info {
 	template<typename T>
 	static field_info build(T** ptr, std::size_t count, bool is_ex) {
 		bool is_shared = 0;
-		std::size_t(*destroy)(void*) = std_dest<T>;
+		std::size_t (*destroy)(void*) = std_dest<T>;
 		flatten_result(*flatten)(void*) = (flatten_result(*)(void*))std_flat<T>;
 		void* (*init_at)(void*, void*) = std_init<T>;
 		if constexpr (!std::is_fundamental<T>::value) {
@@ -116,14 +139,22 @@ struct field_info {
 		res.type_size = sizeof(T);
 		res.is_existing = !is_ex;
 		res.count = count;
-		res.tn_ = typeid(T).name();
 		return res;
 	}
 
 };
 
 struct from_existing {
+private:
 	void* ptr;
+
+	template<typename T, typename ...Args>
+	void existing_field_from_array(T* ptr) {
+		new(ptr) T(this->ptr);
+		this->ptr = T::init_at(ptr, this->ptr);
+	}
+
+public:
 	from_existing(void* ptr = nullptr) : ptr(ptr) {};
 
 	template<typename T, typename ...Args>
@@ -150,12 +181,6 @@ struct from_existing {
 			this->ptr = T::init_at(*ptr, this->ptr);
 		}
 		return field_info::build(ptr, 1, 1);
-	}
-
-	template<typename T, typename ...Args>
-	void existing_field_from_array(T* ptr) {
-		new(ptr) T(this->ptr);
-		this->ptr = T::init_at(ptr, this->ptr);
 	}
 
 	template<typename T, typename ...Args>
@@ -259,9 +284,10 @@ public:
 		}
 		return field_info::build(ptr, count, 1);
 	}
+
 private:
 	can_be_shared(const can_be_shared& other) {};
-	can_be_shared& operator=(const can_be_shared& other) {};
+	can_be_shared& operator=(const can_be_shared& other) { return *this; };
 };
 
 #endif 
