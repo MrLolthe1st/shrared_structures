@@ -285,6 +285,15 @@ public:
 		return field_info::build(ptr, count, 1);
 	}
 
+	template<typename T, typename ...Args>
+	field_info array(T** ptr, std::size_t count, void(*init_fn)(T&, std::size_t, Args...), Args...args) {
+		*ptr = (T*)(malloc(sizeof(T) * count));
+		for (std::size_t i = 0; i < count; ++i) {
+			init_fn((*ptr)[i], i, args...);
+		}
+		return field_info::build(ptr, count, 1);
+	}
+
 private:
 	can_be_shared(const can_be_shared& other) {};
 	can_be_shared& operator=(const can_be_shared& other) { return *this; };
